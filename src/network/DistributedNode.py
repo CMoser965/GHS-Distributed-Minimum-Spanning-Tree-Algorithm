@@ -10,6 +10,9 @@ MESSAGE_TYPES = {
     'CHECK_TERMINATION': 'check_termination'
 }
 
+message_count = 0
+message_count_lock = asyncio.Lock()  # Lock for thread safety
+
 class DistributedNode:
     def __init__(self, node_id, neighbors, port):
         self.node_id = node_id
@@ -21,44 +24,39 @@ class DistributedNode:
 
     async def start(self):
         """ Start the node's server to listen for incoming messages. """
-        print(f"Node {self.node_id} starting...")
-
-        # Start the listening server as a background task
         asyncio.create_task(self.listen())
-        
-        print(f"Node {self.node_id} started listening.")
 
     async def listen(self):
         """ Listen for incoming messages from neighbors. """
         try:
             server_socket = await asyncio.start_server(self.handle_connection, 'localhost', self.port)
-            print(f"Node {self.node_id} listening on port {self.port}")
             async with server_socket:
                 await server_socket.serve_forever()
         except Exception as e:
-            print(f"Error in node {self.node_id} while listening: {e}")
+            pass
 
     async def handle_connection(self, reader, writer):
         """ Handle incoming connections. """
         try:
-            print(f"Node {self.node_id} handling connection...")
             data = await reader.read(1024)
             if data:
                 message = json.loads(data.decode('utf-8'))
-                print(f"Node {self.node_id} received message: {message}")
                 await self.handle_message(message)
         except Exception as e:
-            print(f"Error handling connection on node {self.node_id}: {e}")
+            pass
         finally:
             writer.close()
             await writer.wait_closed()
 
     async def handle_message(self, message):
         """ Handle incoming messages and process them asynchronously. """
+        global message_count
         msg_type = message['type']
         sender_id = message['sender_id']
 
-        print(f"Node {self.node_id} handling message: {message}")
+        async with message_count_lock:
+            message_count += 1
+            print(f"Message count:\t{message_count}")
 
         if msg_type == 'MOE_REQUEST':
             response = {
@@ -96,14 +94,12 @@ class DistributedNode:
 
         elif msg_type == 'FRAGMENT_UPDATE':
             if self.fragment_id != message['fragment_id']:
-                print(f"Node {self.node_id} updating to new fragment ID: {message['fragment_id']}")
                 self.fragment_id = message['fragment_id']
                 self.fragment_changed = True
                 await self.propagate_fragment_change()
 
     async def propagate_fragment_change(self):
         """ Propagate the fragment change to all neighbors asynchronously. """
-        print(f"Node {self.node_id} propagating fragment change. New fragment ID: {self.fragment_id}")
         for neighbor_id, (neighbor_address, port) in self.neighbors.items():
             update_message = {
                 'type': 'FRAGMENT_UPDATE',
@@ -114,22 +110,25 @@ class DistributedNode:
 
     async def send_message(self, neighbor_id, message):
         """ Send a message to a neighbor. """
+        global message_count
         neighbor_address, port = self.neighbors[neighbor_id]
         try:
-            print(f"Node {self.node_id} sending message to {neighbor_id} on port {port}")
             reader, writer = await asyncio.open_connection(neighbor_address, port)
             writer.write(json.dumps(message).encode('utf-8'))
             await writer.drain()
-            print(f"Node {self.node_id} successfully sent message to {neighbor_id}")
+
+            async with message_count_lock:
+                message_count += 1
+                print(f"Message count:\t{message_count}")
+
             writer.close()
             await writer.wait_closed()
         except Exception as e:
-            print(f"Error sending message from node {self.node_id} to {neighbor_id}: {e}")
+            pass
 
     async def find_moe(self):
         """ Find the minimum outgoing edge. Sends MOE_REQUEST to all neighbors only if the fragment has changed. """
         if self.moe is None or self.fragment_changed:
-            print(f"Node {self.node_id} sending MOE requests to neighbors...")
             for neighbor_id, (neighbor_address, port) in self.neighbors.items():
                 moe_request = {
                     'type': MESSAGE_TYPES['MOE_REQUEST'],
@@ -138,11 +137,8 @@ class DistributedNode:
                 await self.send_message(neighbor_id, moe_request)
             self.fragment_changed = False  # Reset the flag after sending MOE requests
 
-
-    
-    async def check_termination(self):
+    async def check_termination(self): 
         """ Send a termination check message to all neighbors asynchronously. """
-        print(f"Node {self.node_id} checking for termination...")
         for neighbor_id, (neighbor_address, port) in self.neighbors.items():
             termination_request = {
                 'type': MESSAGE_TYPES['CHECK_TERMINATION'],
@@ -151,7 +147,6 @@ class DistributedNode:
             }
             await self.send_message(neighbor_id, termination_request)
 
-
 async def check_termination(nodes):
     """ Check if all nodes have reached the same fragment and simulate merging. """
     fragment_id = None
@@ -159,12 +154,10 @@ async def check_termination(nodes):
     while True:
         all_same_fragment = True
 
-        # Simulate fragment merging
         for node in nodes:
             if fragment_id is None:
                 fragment_id = node.fragment_id
             elif node.fragment_id != fragment_id:
-                print(f"Node {node.node_id} has a different fragment: {node.fragment_id}")
                 node.fragment_id = fragment_id  # Simulate merging
 
         # Check if all nodes now have the same fragment
@@ -175,13 +168,11 @@ async def check_termination(nodes):
                 break
 
         if all_same_fragment:
-            print("All nodes are in the same fragment. Terminating...")
             break
         
         await asyncio.sleep(1)  # Wait before the next check
 
-
-
+# TEST FUNC
 async def main():
     node_a = DistributedNode('A', {'B': ('localhost', 5001), 'C': ('localhost', 5002)}, 5000)
     node_b = DistributedNode('B', {'A': ('localhost', 5000), 'C': ('localhost', 5002), 'D': ('localhost', 5003)}, 5001)
@@ -201,6 +192,7 @@ async def main():
     # Check for termination
     await check_termination([node_a, node_b, node_c, node_d])
 
+# TEST FUNC
 async def simple_test():
     node_a = DistributedNode('A', {'B': ('localhost', 5001)}, 5000)
     node_b = DistributedNode('B', {'A': ('localhost', 5000)}, 5001)
@@ -223,6 +215,7 @@ async def simple_test():
     # Check for termination
     await check_termination([node_a, node_b])
 
+# TEST LIBRARY 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
